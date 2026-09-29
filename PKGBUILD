@@ -9,7 +9,8 @@ license=('MIT')
 depends=('python' 'ffmpeg' 'imagemagick' 'poppler' 'libnotify')
 optdepends=(
     'libreoffice-fresh: conversion des documents bureautiques vers PDF'
-    'pandoc-cli: conversion des documents Markdown'
+    'openoffice-bin: alternative pour conversion des documents bureautiques vers PDF'
+    'pandoc-cli: conversion des documents Markdown et DOCX'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Louis27940/$pkgname/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')

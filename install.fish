@@ -50,12 +50,22 @@ end
 
 echo ""
 echo "=== Verification des outils optionnels ==="
-for opt_tool in libreoffice pandoc
-    if not command -v $opt_tool >/dev/null 2>&1
-        echo "Optionnel absent: $opt_tool (necessaire pour conversion Office/Markdown)"
-    else
-        echo "Optionnel present: $opt_tool"
+set -l office_found 0
+for opt_office in libreoffice soffice openoffice ooffice
+    if command -v $opt_office >/dev/null 2>&1
+        echo "Optionnel present: $opt_office (suite bureautique pour conversion PDF)"
+        set office_found 1
+        break
     end
+end
+if test $office_found -eq 0
+    echo "Optionnel absent: libreoffice / openoffice (necessaire pour conversion Office vers PDF)"
+end
+
+if not command -v pandoc >/dev/null 2>&1
+    echo "Optionnel absent: pandoc (necessaire pour conversion Markdown/DOCX)"
+else
+    echo "Optionnel present: pandoc"
 end
 
 echo ""

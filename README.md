@@ -19,8 +19,8 @@ Convertisseur de fichiers universel, 100 % local et natif pour KDE Plasma (Dolph
 - `libnotify` (`notify-send`)
 
 Optionnel :
-- `libreoffice-fresh` (pour documents Word/LibreOffice vers PDF)
-- `pandoc-cli` (pour Markdown vers DOCX/PDF)
+- `libreoffice-fresh` ou `openoffice-bin` (pour documents Word/LibreOffice/OpenOffice vers PDF)
+- `pandoc-cli` (pour conversion Markdown vers DOCX/HTML et DOCX vers Markdown)
 
 ## Installation rapide (Espace utilisateur)
 

@@ -277,10 +277,10 @@ class TestAdapters(unittest.TestCase):
             adapter.convert(Path("/tmp/test.pdf"), Path("/tmp/test.png"))
         self.assertEqual(ctx.exception.tool_name, "poppler")
 
-        # Missing libreoffice
+        # Missing libreoffice / openoffice
         with self.assertRaises(self.mod.MissingToolError) as ctx:
             adapter.convert(Path("/tmp/test.docx"), Path("/tmp/test.pdf"))
-        self.assertEqual(ctx.exception.tool_name, "libreoffice")
+        self.assertIn("libreoffice", ctx.exception.tool_name)
 
         # Missing pandoc
         with self.assertRaises(self.mod.MissingToolError) as ctx:
@@ -385,11 +385,12 @@ class TestAdapters(unittest.TestCase):
         adapter = self.mod.DocumentAdapter()
         with self.assertRaises(self.mod.MissingToolError) as ctx:
             adapter.convert(Path("/tmp/test.md"), Path("/tmp/test.pdf"))
-        self.assertEqual(ctx.exception.tool_name, "libreoffice")
+        self.assertIn("libreoffice", ctx.exception.tool_name)
 
     @patch("subprocess.run")
-    @patch("shutil.which", return_value="/usr/bin/libreoffice")
+    @patch("shutil.which")
     def test_document_convert_doc_to_pdf_no_output_produced(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/libreoffice" if tool == "libreoffice" else None
         mock_run.return_value = MagicMock(returncode=0)
         adapter = self.mod.DocumentAdapter()
         src = Path("/tmp/test.docx")
@@ -397,11 +398,12 @@ class TestAdapters(unittest.TestCase):
 
         with self.assertRaises(self.mod.ConversionError) as ctx:
             adapter.convert(src, dst)
-        self.assertIn("LibreOffice n'a produit aucun fichier PDF pour test.docx", str(ctx.exception))
+        self.assertIn("n'a produit aucun fichier PDF pour test.docx", str(ctx.exception))
 
     @patch("subprocess.run")
-    @patch("shutil.which", return_value="/usr/bin/libreoffice")
+    @patch("shutil.which")
     def test_document_convert_doc_to_pdf_globbed_output(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/libreoffice" if tool == "libreoffice" else None
         with tempfile.TemporaryDirectory() as tmpdir:
             src = Path(tmpdir) / "document.docx"
             src.touch()
@@ -417,6 +419,76 @@ class TestAdapters(unittest.TestCase):
             out = adapter.convert(src, dst)
             self.assertEqual(out, dst)
             self.assertTrue(dst.exists())
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_document_convert_soffice_fallback(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/soffice" if tool == "soffice" else None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "test.docx"
+            src.touch()
+            dst = Path(tmpdir) / "test.pdf"
+
+            def fake_run(cmd, **kwargs):
+                outdir = Path(cmd[cmd.index("--outdir") + 1])
+                (outdir / "test.pdf").touch()
+                return MagicMock(returncode=0)
+
+            mock_run.side_effect = fake_run
+            adapter = self.mod.DocumentAdapter()
+            out = adapter.convert(src, dst)
+            self.assertEqual(out, dst)
+            args = mock_run.call_args[0][0]
+            self.assertEqual(args[0], "/usr/bin/soffice")
+            self.assertIn("--headless", args)
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_document_convert_openoffice_fallback(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/openoffice" if tool == "openoffice" else None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "test.odt"
+            src.touch()
+            dst = Path(tmpdir) / "test.pdf"
+
+            def fake_run(cmd, **kwargs):
+                outdir = Path(cmd[cmd.index("--outdir") + 1])
+                (outdir / "test.pdf").touch()
+                return MagicMock(returncode=0)
+
+            mock_run.side_effect = fake_run
+            adapter = self.mod.DocumentAdapter()
+            out = adapter.convert(src, dst)
+            self.assertEqual(out, dst)
+            args = mock_run.call_args[0][0]
+            self.assertEqual(args[0], "/usr/bin/openoffice")
+            self.assertIn("--headless", args)
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_pandoc_md_to_html(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/pandoc" if tool == "pandoc" else None
+        mock_run.return_value = MagicMock(returncode=0)
+        adapter = self.mod.DocumentAdapter()
+        src = Path("/tmp/doc.md")
+        dst = Path("/tmp/doc.html")
+        out = adapter.convert(src, dst)
+        self.assertEqual(out, dst)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "/usr/bin/pandoc")
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_pandoc_docx_to_md(self, mock_which, mock_run):
+        mock_which.side_effect = lambda tool: "/usr/bin/pandoc" if tool == "pandoc" else None
+        mock_run.return_value = MagicMock(returncode=0)
+        adapter = self.mod.DocumentAdapter()
+        src = Path("/tmp/doc.docx")
+        dst = Path("/tmp/doc.md")
+        out = adapter.convert(src, dst)
+        self.assertEqual(out, dst)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "/usr/bin/pandoc")
 
 if __name__ == "__main__":
     unittest.main()
