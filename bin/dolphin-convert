@@ -96,6 +96,176 @@ class Notifier:
         cls._run_notify(args)
 
 
+
+class ConversionError(Exception):
+    """Exception de base pour les erreurs de conversion."""
+    pass
+
+
+class MissingToolError(ConversionError):
+    """Exception levee lorsqu'un outil systeme obligatoire est absent."""
+    def __init__(self, tool_name: str, install_hint: str):
+        self.tool_name = tool_name
+        self.install_hint = install_hint
+        super().__init__(f"Outil requis absent: '{tool_name}'. {install_hint}")
+
+
+class BaseAdapter:
+    """Interface de base des adaptateurs de conversion."""
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        raise NotImplementedError
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        raise NotImplementedError
+
+
+class ImageAdapter(BaseAdapter):
+    """Conversion d'images via ImageMagick."""
+
+    SUPPORTED_INPUTS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".tif", ".svg", ".gif", ".heic"}
+    SUPPORTED_TARGETS = {"webp", "png", "jpg", "jpeg", "avif", "bmp", "tiff"}
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        fmt = target_format.lower().lstrip(".")
+        return source_path.suffix.lower() in self.SUPPORTED_INPUTS and fmt in self.SUPPORTED_TARGETS
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        tool = shutil.which("magick") or shutil.which("convert")
+        if not tool:
+            raise MissingToolError("imagemagick", "Installez avec : sudo pacman -S imagemagick")
+
+        target_fmt = target_path.suffix.lower().lstrip(".")
+        cmd = [tool, str(source_path), "-auto-orient"]
+
+        if quality:
+            cmd.extend(["-quality", str(quality)])
+        elif target_fmt in ("jpg", "jpeg"):
+            cmd.extend(["-quality", "90"])
+        elif target_fmt == "webp":
+            cmd.extend(["-quality", "85"])
+        elif target_fmt == "avif":
+            cmd.extend(["-quality", "80"])
+
+        cmd.append(str(target_path))
+
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise ConversionError(f"Erreur ImageMagick : {res.stderr.strip() or res.stdout.strip()}")
+        return target_path
+
+
+class MediaAdapter(BaseAdapter):
+    """Conversion audio et video via FFmpeg."""
+
+    VIDEO_INPUTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts"}
+    AUDIO_INPUTS = {".mp3", ".aac", ".flac", ".wav", ".ogg", ".m4a", ".opus", ".wma"}
+    VIDEO_TARGETS = {"mp4", "mkv", "webm"}
+    AUDIO_TARGETS = {"mp3", "aac", "flac", "wav", "ogg"}
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        ext = source_path.suffix.lower()
+        fmt = target_format.lower().lstrip(".")
+        all_inputs = self.VIDEO_INPUTS | self.AUDIO_INPUTS
+        all_targets = self.VIDEO_TARGETS | self.AUDIO_TARGETS
+        return ext in all_inputs and fmt in all_targets
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        tool = shutil.which("ffmpeg")
+        if not tool:
+            raise MissingToolError("ffmpeg", "Installez avec : sudo pacman -S ffmpeg")
+
+        target_fmt = target_path.suffix.lower().lstrip(".")
+        cmd = [tool, "-v", "error", "-stats", "-y", "-i", str(source_path)]
+
+        if target_fmt == "mp4":
+            cmd.extend(["-c:v", "libx264", "-crf", "22", "-preset", "fast", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        elif target_fmt == "mkv":
+            cmd.extend(["-c:v", "libx264", "-crf", "22", "-preset", "fast", "-c:a", "aac", "-b:a", "192k"])
+        elif target_fmt == "webm":
+            cmd.extend(["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus", "-b:a", "128k"])
+        elif target_fmt == "mp3":
+            cmd.extend(["-vn", "-c:a", "libmp3lame", "-q:a", "2"])
+        elif target_fmt == "aac":
+            cmd.extend(["-vn", "-c:a", "aac", "-b:a", "256k"])
+        elif target_fmt == "flac":
+            cmd.extend(["-vn", "-c:a", "flac"])
+        elif target_fmt == "wav":
+            cmd.extend(["-vn", "-c:a", "pcm_s16le"])
+        elif target_fmt == "ogg":
+            cmd.extend(["-vn", "-c:a", "libvorbis", "-q:a", "6"])
+
+        cmd.append(str(target_path))
+
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise ConversionError(f"Erreur FFmpeg : {res.stderr.strip() or res.stdout.strip()}")
+        return target_path
+
+
+class DocumentAdapter(BaseAdapter):
+    """Conversion de documents via Poppler, LibreOffice ou Pandoc."""
+
+    DOC_INPUTS = {".docx", ".doc", ".odt", ".rtf", ".txt", ".md"}
+    IMAGE_TARGETS = {"png", "jpg", "jpeg"}
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        ext = source_path.suffix.lower()
+        fmt = target_format.lower().lstrip(".")
+        if ext == ".pdf" and fmt in self.IMAGE_TARGETS:
+            return True
+        if ext in self.DOC_INPUTS and fmt == "pdf":
+            return True
+        if ext == ".md" and fmt in ("docx", "html"):
+            return True
+        return False
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        ext = source_path.suffix.lower()
+        target_fmt = target_path.suffix.lower().lstrip(".")
+
+        if ext == ".pdf" and target_fmt in self.IMAGE_TARGETS:
+            tool = shutil.which("pdftoppm")
+            if not tool:
+                raise MissingToolError("poppler", "Installez avec : sudo pacman -S poppler")
+
+            flag = "-png" if target_fmt == "png" else "-jpeg"
+            prefix = str(target_path.parent / target_path.stem)
+            cmd = [tool, flag, "-r", "150", str(source_path), prefix]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise ConversionError(f"Erreur pdftoppm : {res.stderr.strip() or res.stdout.strip()}")
+
+            single_page = Path(f"{prefix}-1.{target_fmt}")
+            if single_page.exists():
+                next_page = Path(f"{prefix}-2.{target_fmt}")
+                if not next_page.exists():
+                    single_page.replace(target_path)
+                    return target_path
+            return target_path
+
+        if ext in self.DOC_INPUTS and target_fmt == "pdf":
+            tool = shutil.which("libreoffice")
+            if not tool:
+                raise MissingToolError("libreoffice", "Installez avec : sudo pacman -S libreoffice-fresh")
+            cmd = [tool, "--headless", "--convert-to", "pdf", "--outdir", str(target_path.parent), str(source_path)]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise ConversionError(f"Erreur LibreOffice : {res.stderr.strip() or res.stdout.strip()}")
+            return target_path
+
+        if ext == ".md":
+            tool = shutil.which("pandoc")
+            if not tool:
+                raise MissingToolError("pandoc", "Installez avec : sudo pacman -S pandoc-cli")
+            cmd = [tool, str(source_path), "-o", str(target_path)]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise ConversionError(f"Erreur Pandoc : {res.stderr.strip() or res.stdout.strip()}")
+            return target_path
+
+        raise ConversionError(f"Aucun outil disponible pour convertir {source_path} en {target_fmt}")
+
+
 if __name__ == "__main__":
     pass
 
