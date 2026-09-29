@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=image/jpeg;image/png;image/webp;image/avif;image/bmp;image/tiff;image/svg+xml;image/heic;image/gif;
+X-KDE-Submenu=Convertir l'image en...
+Actions=ToWebP;ToPNG;ToJPG;ToAVIF;
+
+[Desktop Action ToWebP]
+Name=WebP
+Icon=image-x-generic
+Exec=dolphin-convert --format webp %F
+
+[Desktop Action ToPNG]
+Name=PNG
+Icon=image-png
+Exec=dolphin-convert --format png %F
+
+[Desktop Action ToJPG]
+Name=JPEG
+Icon=image-jpeg
+Exec=dolphin-convert --format jpg %F
+
+[Desktop Action ToAVIF]
+Name=AVIF
+Icon=image-x-generic
+Exec=dolphin-convert --format avif %F
