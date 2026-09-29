@@ -77,6 +77,7 @@ cp "$SCRIPT_DIR/bin/dolphin-convert" "$USER_BIN/dolphin-convert"
 chmod +x "$USER_BIN/dolphin-convert"
 
 cp "$SCRIPT_DIR/servicemenus/"*.desktop "$USER_MENUS/"
+chmod +x "$USER_MENUS/"*.desktop
 
 echo "Installation reussie dans :"
 echo "  - Binaire      : $USER_BIN/dolphin-convert"

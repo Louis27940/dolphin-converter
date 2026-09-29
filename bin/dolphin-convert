@@ -291,6 +291,8 @@ class DocumentAdapter(BaseAdapter):
 
             tool = self._get_office_tool()
             if not tool:
+                if ext == ".md":
+                    raise MissingToolError("typst / libreoffice", "Pour convertir du Markdown en PDF, installez typst (sudo pacman -S typst) ou LibreOffice/OpenOffice (sudo pacman -S libreoffice-fresh).")
                 raise MissingToolError("libreoffice/openoffice", "Installez LibreOffice ou OpenOffice (ex: sudo pacman -S libreoffice-fresh)")
 
             with tempfile.TemporaryDirectory() as tmpdir:
