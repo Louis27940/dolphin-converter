@@ -284,9 +284,12 @@ class TestAdapters(unittest.TestCase):
             src = tmp_path / "document.docx"
             src.touch()
             dst = tmp_path / "document_1.pdf"
+            pre_existing = tmp_path / "document.pdf"
+            pre_existing.touch()
 
             def fake_run(cmd, **kwargs):
-                (tmp_path / "document.pdf").touch()
+                outdir = Path(cmd[cmd.index("--outdir") + 1])
+                (outdir / "document.pdf").touch()
                 return MagicMock(returncode=0)
 
             mock_run.side_effect = fake_run
@@ -294,7 +297,7 @@ class TestAdapters(unittest.TestCase):
             out = adapter.convert(src, dst)
             self.assertEqual(out, dst)
             self.assertTrue(dst.exists())
-            self.assertFalse((tmp_path / "document.pdf").exists())
+            self.assertTrue(pre_existing.exists())
 
     @patch("subprocess.run")
     @patch("shutil.which")

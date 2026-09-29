@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Dolphin Converter - Orchestrateur universel de conversion de fichiers."""
 
+import argparse
+import concurrent.futures
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -256,14 +261,16 @@ class DocumentAdapter(BaseAdapter):
             tool = shutil.which("libreoffice")
             if not tool:
                 raise MissingToolError("libreoffice", "Installez avec : sudo pacman -S libreoffice-fresh")
-            cmd = [tool, "--headless", "--convert-to", "pdf", "--outdir", str(target_path.parent), str(source_path)]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode != 0:
-                raise ConversionError(f"Erreur LibreOffice : {res.stderr.strip() or res.stdout.strip()}")
 
-            default_output = target_path.parent / f"{source_path.stem}.pdf"
-            if default_output.exists() and default_output != target_path:
-                default_output.replace(target_path)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cmd = [tool, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, str(source_path)]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode != 0:
+                    raise ConversionError(f"Erreur LibreOffice : {res.stderr.strip() or res.stdout.strip()}")
+
+                default_output = Path(tmpdir) / f"{source_path.stem}.pdf"
+                if default_output.exists():
+                    shutil.move(str(default_output), str(target_path))
             return target_path
 
         if ext == ".md":
@@ -279,6 +286,98 @@ class DocumentAdapter(BaseAdapter):
         raise ConversionError(f"Aucun outil disponible pour convertir {source_path} en {target_fmt}")
 
 
+class ConversionDispatcher:
+    """Orchestration de la conversion, resolution des adaptateurs et parallelisme."""
+
+    def __init__(self):
+        self.adapters = [
+            ImageAdapter(),
+            MediaAdapter(),
+            DocumentAdapter(),
+        ]
+
+    def get_adapter(self, source_path: Path, target_format: str) -> BaseAdapter:
+        for adapter in self.adapters:
+            if adapter.can_handle(source_path, target_format):
+                return adapter
+        raise ConversionError(f"Aucune regle de conversion disponible pour '{source_path.suffix}' vers '{target_format}'.")
+
+    def convert_single(self, source_path: Path, target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None) -> Path:
+        if not source_path.exists():
+            raise ConversionError(f"Le fichier source n'existe pas : {source_path}")
+
+        adapter = self.get_adapter(source_path, target_format)
+        target_path = NamingResolver.resolve_target_path(source_path, target_format, output_dir=output_dir)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        unique_target = NamingResolver.get_unique_path(target_path)
+        return adapter.convert(source_path, unique_target, quality=quality)
+
+    def run_batch(self, sources: list[Path], target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None, silent: bool = False) -> int:
+        if not sources:
+            return 0
+
+        Notifier.send_start(count=len(sources), target_format=target_format, silent=silent)
+
+        successes: list[Path] = []
+        errors: list[str] = []
+
+        max_workers = min(4, os.cpu_count() or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_file = {
+                executor.submit(self.convert_single, src, target_format, output_dir, quality): src
+                for src in sources
+            }
+            for future in concurrent.futures.as_completed(future_to_file):
+                src = future_to_file[future]
+                try:
+                    out = future.result()
+                    successes.append(out)
+                except Exception as e:
+                    errors.append(f"{src.name}: {str(e)}")
+
+        if successes:
+            sample = successes[0] if len(successes) == 1 else None
+            Notifier.send_success(success_count=len(successes), target_format=target_format, sample_file=sample)
+
+        if errors:
+            err_msg = "\n".join(errors[:3])
+            if len(errors) > 3:
+                err_msg += f"\n... et {len(errors) - 3} autre(s) erreur(s)."
+            Notifier.send_error(err_msg)
+            return 1 if not successes else 0
+
+        return 0
+
+
+def cli_main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dolphin-convert",
+        description="Convertisseur de fichiers universel integre pour Dolphin (KDE Plasma)."
+    )
+    parser.add_argument("-f", "--format", required=True, help="Format cible (ex: webp, png, jpg, mp4, mp3, pdf)")
+    parser.add_argument("-q", "--quality", help="Niveau de qualite (ex: 80, high, medium)")
+    parser.add_argument("-o", "--output-dir", help="Repertoire de sortie (defaut : dossier source)")
+    parser.add_argument("--silent", action="store_true", help="Desactiver la notification de demarrage")
+    parser.add_argument("files", nargs="+", help="Chemins des fichiers a convertir")
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+    source_paths = [Path(f).resolve() for f in args.files]
+    out_dir = Path(args.output_dir).resolve() if args.output_dir else None
+
+    dispatcher = ConversionDispatcher()
+    return dispatcher.run_batch(
+        sources=source_paths,
+        target_format=args.format,
+        output_dir=out_dir,
+        quality=args.quality,
+        silent=args.silent
+    )
+
+
 if __name__ == "__main__":
-    pass
+    sys.exit(cli_main(sys.argv[1:]))
 
