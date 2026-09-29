@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/pdf;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/msword;application/vnd.oasis.opendocument.text;text/markdown;text/html;
+X-KDE-Submenu=Convertir le document en...
+Actions=ToImages;ToPDF;ToDOCX;ToMD;ToHTML;
+
+[Desktop Action ToImages]
+Name=Extraire les pages en PNG
+Icon=document-export
+Exec=dolphin-convert --format png %F
+
+[Desktop Action ToPDF]
+Name=Vers PDF
+Icon=application-pdf
+Exec=dolphin-convert --format pdf %F
+
+[Desktop Action ToDOCX]
+Name=Vers DOCX
+Icon=x-office-document
+Exec=dolphin-convert --format docx %F
+
+[Desktop Action ToMD]
+Name=Vers Markdown
+Icon=text-markdown
+Exec=dolphin-convert --format md %F
+
+[Desktop Action ToHTML]
+Name=Vers HTML
+Icon=text-html
+Exec=dolphin-convert --format html %F

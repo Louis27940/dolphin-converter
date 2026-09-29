@@ -1,0 +1,46 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/ogg;audio/mpeg;audio/x-wav;audio/flac;audio/ogg;audio/aac;audio/mp4;
+X-KDE-Submenu=Convertir le media en...
+Actions=ToMP4;ToMKV;ToWebM;ToMP3;ToAAC;ToFLAC;ToWAV;ToOGG;
+
+[Desktop Action ToMP4]
+Name=Video MP4 (H.264 / AAC)
+Icon=video-mp4
+Exec=dolphin-convert --format mp4 %F
+
+[Desktop Action ToMKV]
+Name=Video MKV (H.264 / AAC)
+Icon=video-x-matroska
+Exec=dolphin-convert --format mkv %F
+
+[Desktop Action ToWebM]
+Name=Video WebM (VP9 / Opus)
+Icon=video-webm
+Exec=dolphin-convert --format webm %F
+
+[Desktop Action ToMP3]
+Name=Audio MP3 (Extraction / 320k)
+Icon=audio-x-generic
+Exec=dolphin-convert --format mp3 %F
+
+[Desktop Action ToAAC]
+Name=Audio AAC
+Icon=audio-x-generic
+Exec=dolphin-convert --format aac %F
+
+[Desktop Action ToFLAC]
+Name=Audio FLAC (Lossless)
+Icon=audio-x-flac
+Exec=dolphin-convert --format flac %F
+
+[Desktop Action ToWAV]
+Name=Audio WAV (PCM 16-bit)
+Icon=audio-x-wav
+Exec=dolphin-convert --format wav %F
+
+[Desktop Action ToOGG]
+Name=Audio OGG (Vorbis)
+Icon=audio-x-vorbis+ogg
+Exec=dolphin-convert --format ogg %F

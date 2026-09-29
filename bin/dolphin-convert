@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Dolphin Converter - Orchestrateur universel de conversion de fichiers."""
 
+import argparse
+import concurrent.futures
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -15,8 +23,9 @@ class NamingResolver:
         return directory / new_name
 
     @staticmethod
-    def get_unique_path(target_path: Path) -> Path:
-        if not target_path.exists():
+    def get_unique_path(target_path: Path, reserved_paths: Optional[set[Path]] = None) -> Path:
+        is_taken = lambda p: p.exists() or (reserved_paths is not None and p in reserved_paths)
+        if not is_taken(target_path):
             return target_path
 
         parent = target_path.parent
@@ -26,9 +35,399 @@ class NamingResolver:
         counter = 1
         while True:
             candidate = parent / f"{stem}_{counter}{suffix}"
-            if not candidate.exists():
+            if not is_taken(candidate):
                 return candidate
             counter += 1
 
-if __name__ == "__main__":
+
+class Notifier:
+    """Emission des notifications KDE Plasma via notify-send."""
+
+    APP_NAME = "Dolphin Converter"
+
+    @classmethod
+    def _run_notify(cls, args: list[str]) -> None:
+        if not shutil.which("notify-send"):
+            return
+        try:
+            subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
+    @classmethod
+    def send_start(cls, count: int, target_format: str, silent: bool = False) -> None:
+        if silent or count <= 0:
+            return
+        plural = "s" if count > 1 else ""
+        body = f"Conversion de {count} fichier{plural} vers {target_format.upper()} en cours..."
+        args = [
+            "notify-send",
+            "-a", cls.APP_NAME,
+            "-i", "transform-browse",
+            "--hint=int:transient:1",
+            cls.APP_NAME,
+            body
+        ]
+        cls._run_notify(args)
+
+    @classmethod
+    def send_success(cls, success_count: int, target_format: str, sample_file: Optional[Path] = None) -> None:
+        if success_count <= 0:
+            return
+        title = "Conversion terminee"
+        if success_count == 1 and sample_file is not None:
+            body = f"Fichier converti : {sample_file.name}"
+        else:
+            plural = "s" if success_count > 1 else ""
+            body = f"{success_count} fichier{plural} converti{plural} avec succes vers {target_format.upper()}."
+
+        args = [
+            "notify-send",
+            "-a", cls.APP_NAME,
+            "-i", "document-save",
+            title,
+            body
+        ]
+        cls._run_notify(args)
+
+    @classmethod
+    def send_error(cls, message: str) -> None:
+        args = [
+            "notify-send",
+            "-a", cls.APP_NAME,
+            "-i", "dialog-error",
+            "-u", "critical",
+            "Erreur de conversion",
+            message
+        ]
+        cls._run_notify(args)
+
+
+
+class ConversionError(Exception):
+    """Exception de base pour les erreurs de conversion."""
     pass
+
+
+class MissingToolError(ConversionError):
+    """Exception levee lorsqu'un outil systeme obligatoire est absent."""
+    def __init__(self, tool_name: str, install_hint: str):
+        self.tool_name = tool_name
+        self.install_hint = install_hint
+        super().__init__(f"Outil requis absent: '{tool_name}'. {install_hint}")
+
+
+class BaseAdapter:
+    """Interface de base des adaptateurs de conversion."""
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        raise NotImplementedError
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        raise NotImplementedError
+
+
+class ImageAdapter(BaseAdapter):
+    """Conversion d'images via ImageMagick."""
+
+    SUPPORTED_INPUTS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".tif", ".svg", ".gif", ".heic"}
+    SUPPORTED_TARGETS = {"webp", "png", "jpg", "jpeg", "avif", "bmp", "tiff"}
+    QUALITY_MAP = {"high": "95", "medium": "80", "low": "60"}
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        fmt = target_format.lower().lstrip(".")
+        return source_path.suffix.lower() in self.SUPPORTED_INPUTS and fmt in self.SUPPORTED_TARGETS
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        tool = shutil.which("magick") or shutil.which("convert")
+        if not tool:
+            raise MissingToolError("imagemagick", "Installez avec : sudo pacman -S imagemagick")
+
+        target_fmt = target_path.suffix.lower().lstrip(".")
+        cmd = [tool, str(source_path), "-auto-orient"]
+
+        if quality:
+            q_str = str(quality).strip()
+            resolved_quality = self.QUALITY_MAP.get(q_str.lower(), q_str)
+            cmd.extend(["-quality", resolved_quality])
+        elif target_fmt in ("jpg", "jpeg"):
+            cmd.extend(["-quality", "90"])
+        elif target_fmt == "webp":
+            cmd.extend(["-quality", "85"])
+        elif target_fmt == "avif":
+            cmd.extend(["-quality", "80"])
+
+        cmd.append(str(target_path))
+
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise ConversionError(f"Erreur ImageMagick : {res.stderr.strip() or res.stdout.strip()}")
+        return target_path
+
+
+class MediaAdapter(BaseAdapter):
+    """Conversion audio et video via FFmpeg."""
+
+    VIDEO_INPUTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts"}
+    AUDIO_INPUTS = {".mp3", ".aac", ".flac", ".wav", ".ogg", ".m4a", ".opus", ".wma"}
+    VIDEO_TARGETS = {"mp4", "mkv", "webm"}
+    AUDIO_TARGETS = {"mp3", "aac", "flac", "wav", "ogg"}
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        ext = source_path.suffix.lower()
+        fmt = target_format.lower().lstrip(".")
+        all_inputs = self.VIDEO_INPUTS | self.AUDIO_INPUTS
+        all_targets = self.VIDEO_TARGETS | self.AUDIO_TARGETS
+        return ext in all_inputs and fmt in all_targets
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        tool = shutil.which("ffmpeg")
+        if not tool:
+            raise MissingToolError("ffmpeg", "Installez avec : sudo pacman -S ffmpeg")
+
+        target_fmt = target_path.suffix.lower().lstrip(".")
+        cmd = [tool, "-v", "error", "-stats", "-y", "-i", str(source_path)]
+
+        if target_fmt == "mp4":
+            cmd.extend(["-c:v", "libx264", "-crf", "22", "-preset", "fast", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        elif target_fmt == "mkv":
+            cmd.extend(["-c:v", "libx264", "-crf", "22", "-preset", "fast", "-c:a", "aac", "-b:a", "192k"])
+        elif target_fmt == "webm":
+            cmd.extend(["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus", "-b:a", "128k"])
+        elif target_fmt == "mp3":
+            cmd.extend(["-vn", "-c:a", "libmp3lame", "-b:a", "320k"])
+        elif target_fmt == "aac":
+            cmd.extend(["-vn", "-c:a", "aac", "-b:a", "256k"])
+        elif target_fmt == "flac":
+            cmd.extend(["-vn", "-c:a", "flac"])
+        elif target_fmt == "wav":
+            cmd.extend(["-vn", "-c:a", "pcm_s16le"])
+        elif target_fmt == "ogg":
+            cmd.extend(["-vn", "-c:a", "libvorbis", "-q:a", "6"])
+
+        cmd.append(str(target_path))
+
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise ConversionError(f"Erreur FFmpeg : {res.stderr.strip() or res.stdout.strip()}")
+        return target_path
+
+
+class DocumentAdapter(BaseAdapter):
+    """Conversion de documents via Poppler, LibreOffice ou Pandoc."""
+
+    DOC_INPUTS = {".docx", ".doc", ".odt", ".rtf", ".txt", ".md"}
+    IMAGE_TARGETS = {"png", "jpg", "jpeg"}
+
+    @staticmethod
+    def _get_office_tool() -> Optional[str]:
+        candidates = [
+            "libreoffice",
+            "soffice",
+            "openoffice",
+            "ooffice",
+            "/opt/openoffice4/program/soffice",
+            "/usr/lib/libreoffice/program/soffice",
+        ]
+        for candidate in candidates:
+            found = shutil.which(candidate) if not candidate.startswith("/") else (candidate if Path(candidate).is_file() else None)
+            if found:
+                return found
+        return None
+
+    def can_handle(self, source_path: Path, target_format: str) -> bool:
+        ext = source_path.suffix.lower()
+        fmt = target_format.lower().lstrip(".")
+        if ext == ".pdf" and fmt in self.IMAGE_TARGETS:
+            return True
+        if ext in self.DOC_INPUTS and fmt == "pdf":
+            return True
+        if ext == ".md" and fmt in ("docx", "html", "pdf"):
+            return True
+        if ext in (".docx", ".odt", ".rtf", ".html", ".txt") and fmt in ("md", "docx", "html"):
+            return True
+        return False
+
+    def convert(self, source_path: Path, target_path: Path, quality: Optional[str] = None) -> Path:
+        ext = source_path.suffix.lower()
+        target_fmt = target_path.suffix.lower().lstrip(".")
+
+        if ext == ".pdf" and target_fmt in self.IMAGE_TARGETS:
+            tool = shutil.which("pdftoppm")
+            if not tool:
+                raise MissingToolError("poppler", "Installez avec : sudo pacman -S poppler")
+
+            flag = "-png" if target_fmt == "png" else "-jpeg"
+            prefix = str(target_path.parent / target_path.stem)
+            cmd = [tool, flag, "-r", "150", str(source_path), prefix]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise ConversionError(f"Erreur pdftoppm : {res.stderr.strip() or res.stdout.strip()}")
+
+            ext_suffix = "jpg" if target_fmt in ("jpg", "jpeg") else "png"
+            single_page = Path(f"{prefix}-1.{ext_suffix}")
+            if single_page.exists():
+                next_page = Path(f"{prefix}-2.{ext_suffix}")
+                if not next_page.exists():
+                    single_page.replace(target_path)
+                    return target_path
+            return target_path
+
+        if ext in self.DOC_INPUTS and target_fmt == "pdf":
+            if ext == ".md" and shutil.which("pandoc"):
+                pdf_engine = (
+                    shutil.which("typst")
+                    or shutil.which("weasyprint")
+                    or shutil.which("pdflatex")
+                    or shutil.which("xelatex")
+                    or shutil.which("wkhtmltopdf")
+                )
+                tool = shutil.which("pandoc")
+                cmd = [tool, str(source_path), "-o", str(target_path)]
+                if pdf_engine:
+                    cmd.insert(1, f"--pdf-engine={pdf_engine}")
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    return target_path
+
+            tool = self._get_office_tool()
+            if not tool:
+                raise MissingToolError("libreoffice/openoffice", "Installez LibreOffice ou OpenOffice (ex: sudo pacman -S libreoffice-fresh)")
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cmd = [tool, "--headless", "--convert-to", "pdf", "--outdir", tmpdir, str(source_path)]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                tool_name = Path(tool).name
+                if res.returncode != 0:
+                    raise ConversionError(f"Erreur {tool_name} : {res.stderr.strip() or res.stdout.strip()}")
+
+                pdfs = list(Path(tmpdir).glob("*.pdf"))
+                if not pdfs:
+                    raise ConversionError(f"{tool_name} n'a produit aucun fichier PDF pour {source_path.name}")
+                shutil.move(str(pdfs[0]), str(target_path))
+            return target_path
+
+        if ext in self.DOC_INPUTS and target_fmt in ("md", "docx", "html"):
+            tool = shutil.which("pandoc")
+            if not tool:
+                raise MissingToolError("pandoc", "Installez avec : sudo pacman -S pandoc-cli")
+            cmd = [tool, str(source_path), "-o", str(target_path)]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                raise ConversionError(f"Erreur Pandoc : {res.stderr.strip() or res.stdout.strip()}")
+            return target_path
+
+        raise ConversionError(f"Aucun outil disponible pour convertir {source_path} en {target_fmt}")
+
+
+class ConversionDispatcher:
+    """Orchestration de la conversion, resolution des adaptateurs et parallelisme."""
+
+    def __init__(self):
+        self.adapters = [
+            ImageAdapter(),
+            MediaAdapter(),
+            DocumentAdapter(),
+        ]
+        self._lock = threading.Lock()
+        self.reserved_paths: set[Path] = set()
+
+    def get_adapter(self, source_path: Path, target_format: str) -> BaseAdapter:
+        for adapter in self.adapters:
+            if adapter.can_handle(source_path, target_format):
+                return adapter
+        raise ConversionError(f"Aucune regle de conversion disponible pour '{source_path.suffix}' vers '{target_format}'.")
+
+    def convert_single(self, source_path: Path, target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None, reserved_paths: Optional[set[Path]] = None) -> Path:
+        if not source_path.exists():
+            raise ConversionError(f"Le fichier source n'existe pas : {source_path}")
+
+        fmt_ext = f".{target_format.lower().lstrip('.')}"
+        is_same_dir = (
+            output_dir is None
+            or output_dir == source_path.parent
+            or (output_dir is not None and output_dir.resolve() == source_path.resolve().parent)
+        )
+        if source_path.suffix.lower() == fmt_ext and is_same_dir:
+            raise ConversionError(f"Le fichier source '{source_path.name}' est deja au format {target_format.upper().lstrip('.')}.")
+
+        adapter = self.get_adapter(source_path, target_format)
+        target_path = NamingResolver.resolve_target_path(source_path, target_format, output_dir=output_dir)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            pool = self.reserved_paths if reserved_paths is None else reserved_paths
+            unique_target = NamingResolver.get_unique_path(target_path, reserved_paths=pool)
+            pool.add(unique_target)
+        return adapter.convert(source_path, unique_target, quality=quality)
+
+    def run_batch(self, sources: list[Path], target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None, silent: bool = False) -> int:
+        if not sources:
+            return 0
+
+        with self._lock:
+            self.reserved_paths.clear()
+
+        Notifier.send_start(count=len(sources), target_format=target_format, silent=silent)
+
+        successes: list[Path] = []
+        errors: list[str] = []
+
+        max_workers = min(4, os.cpu_count() or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_file = {
+                executor.submit(self.convert_single, src, target_format, output_dir, quality): src
+                for src in sources
+            }
+            for future in concurrent.futures.as_completed(future_to_file):
+                src = future_to_file[future]
+                try:
+                    out = future.result()
+                    successes.append(out)
+                except Exception as e:
+                    errors.append(f"{src.name}: {str(e)}")
+
+        if successes:
+            sample = successes[0] if len(successes) == 1 else None
+            Notifier.send_success(success_count=len(successes), target_format=target_format, sample_file=sample)
+
+        if errors:
+            err_msg = "\n".join(errors[:3])
+            if len(errors) > 3:
+                err_msg += f"\n... et {len(errors) - 3} autre(s) erreur(s)."
+            Notifier.send_error(err_msg)
+            return 1 if not successes else 0
+
+        return 0
+
+
+def cli_main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dolphin-convert",
+        description="Convertisseur de fichiers universel integre pour Dolphin (KDE Plasma)."
+    )
+    parser.add_argument("-f", "--format", required=True, help="Format cible (ex: webp, png, jpg, mp4, mp3, pdf)")
+    parser.add_argument("-q", "--quality", help="Niveau de qualite (ex: 80, high, medium)")
+    parser.add_argument("-o", "--output-dir", help="Repertoire de sortie (defaut : dossier source)")
+    parser.add_argument("--silent", action="store_true", help="Desactiver la notification de demarrage")
+    parser.add_argument("files", nargs="+", help="Chemins des fichiers a convertir")
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+    source_paths = [Path(f).resolve() for f in args.files]
+    out_dir = Path(args.output_dir).resolve() if args.output_dir else None
+
+    dispatcher = ConversionDispatcher()
+    return dispatcher.run_batch(
+        sources=source_paths,
+        target_format=args.format,
+        output_dir=out_dir,
+        quality=args.quality,
+        silent=args.silent
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(cli_main(sys.argv[1:]))
+
