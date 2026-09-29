@@ -46,5 +46,26 @@ class TestNamingResolver(unittest.TestCase):
             unique_2 = self.resolver.get_unique_path(target)
             self.assertEqual(unique_2, base / "image_2.png")
 
+    def test_collision_with_reserved_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            target = base / "image.png"
+
+            # Neither exists on disk, but target is reserved
+            reserved: set[Path] = {target}
+            unique_1 = self.resolver.get_unique_path(target, reserved_paths=reserved)
+            self.assertEqual(unique_1, base / "image_1.png")
+
+            # Both target and image_1 are reserved
+            reserved.add(unique_1)
+            unique_2 = self.resolver.get_unique_path(target, reserved_paths=reserved)
+            self.assertEqual(unique_2, base / "image_2.png")
+
+    def test_unreserved_returns_original_if_not_exists(self):
+        target = Path("/nonexistent_dir_xyz/test.png")
+        reserved: set[Path] = set()
+        unique = self.resolver.get_unique_path(target, reserved_paths=reserved)
+        self.assertEqual(unique, target)
+
 if __name__ == "__main__":
     unittest.main()

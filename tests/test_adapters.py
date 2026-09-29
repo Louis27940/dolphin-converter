@@ -66,6 +66,8 @@ class TestAdapters(unittest.TestCase):
         self.assertEqual(args[0], "/usr/bin/ffmpeg")
         self.assertIn("-vn", args)
         self.assertIn("libmp3lame", args)
+        self.assertIn("-b:a", args)
+        self.assertIn("320k", args)
 
     @patch("shutil.which", return_value=None)
     def test_missing_tool_error(self, mock_which):
@@ -103,6 +105,45 @@ class TestAdapters(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertIn("-quality", args)
         self.assertIn("80", args)
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/magick")
+    def test_image_convert_quality_presets(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        adapter = self.mod.ImageAdapter()
+        src = Path("/tmp/test.png")
+        dst = Path("/tmp/test.jpg")
+
+        # high -> 95
+        adapter.convert(src, dst, quality="high")
+        args = mock_run.call_args[0][0]
+        self.assertIn("-quality", args)
+        idx = args.index("-quality")
+        self.assertEqual(args[idx + 1], "95")
+
+        # medium (case-insensitive) -> 80
+        adapter.convert(src, dst, quality="Medium")
+        args = mock_run.call_args[0][0]
+        idx = args.index("-quality")
+        self.assertEqual(args[idx + 1], "80")
+
+        # low -> 60
+        adapter.convert(src, dst, quality="LOW")
+        args = mock_run.call_args[0][0]
+        idx = args.index("-quality")
+        self.assertEqual(args[idx + 1], "60")
+
+        # numeric string -> pass as is
+        adapter.convert(src, dst, quality="75")
+        args = mock_run.call_args[0][0]
+        idx = args.index("-quality")
+        self.assertEqual(args[idx + 1], "75")
+
+        # numeric integer -> pass as string
+        adapter.convert(src, dst, quality=55)
+        args = mock_run.call_args[0][0]
+        idx = args.index("-quality")
+        self.assertEqual(args[idx + 1], "55")
 
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/magick")
@@ -196,7 +237,11 @@ class TestAdapters(unittest.TestCase):
     @patch("subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/libreoffice")
     def test_document_convert_doc_to_pdf(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
+        def fake_run(cmd, **kwargs):
+            outdir = Path(cmd[cmd.index("--outdir") + 1])
+            (outdir / "test.pdf").touch()
+            return MagicMock(returncode=0)
+        mock_run.side_effect = fake_run
         adapter = self.mod.DocumentAdapter()
         src = Path("/tmp/test.docx")
         dst = Path("/tmp/test.pdf")
@@ -317,7 +362,11 @@ class TestAdapters(unittest.TestCase):
     @patch("subprocess.run")
     @patch("shutil.which")
     def test_document_convert_md_to_pdf_fallback_libreoffice(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
+        def fake_run(cmd, **kwargs):
+            outdir = Path(cmd[cmd.index("--outdir") + 1])
+            (outdir / "test.pdf").touch()
+            return MagicMock(returncode=0)
+        mock_run.side_effect = fake_run
         mock_which.side_effect = lambda tool: "/usr/bin/libreoffice" if tool == "libreoffice" else None
         adapter = self.mod.DocumentAdapter()
         src = Path("/tmp/test.md")
@@ -337,6 +386,37 @@ class TestAdapters(unittest.TestCase):
         with self.assertRaises(self.mod.MissingToolError) as ctx:
             adapter.convert(Path("/tmp/test.md"), Path("/tmp/test.pdf"))
         self.assertEqual(ctx.exception.tool_name, "libreoffice")
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/libreoffice")
+    def test_document_convert_doc_to_pdf_no_output_produced(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        adapter = self.mod.DocumentAdapter()
+        src = Path("/tmp/test.docx")
+        dst = Path("/tmp/test.pdf")
+
+        with self.assertRaises(self.mod.ConversionError) as ctx:
+            adapter.convert(src, dst)
+        self.assertIn("LibreOffice n'a produit aucun fichier PDF pour test.docx", str(ctx.exception))
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/libreoffice")
+    def test_document_convert_doc_to_pdf_globbed_output(self, mock_which, mock_run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "document.docx"
+            src.touch()
+            dst = Path(tmpdir) / "target.pdf"
+
+            def fake_run(cmd, **kwargs):
+                outdir = Path(cmd[cmd.index("--outdir") + 1])
+                (outdir / "custom_generated.pdf").touch()
+                return MagicMock(returncode=0)
+
+            mock_run.side_effect = fake_run
+            adapter = self.mod.DocumentAdapter()
+            out = adapter.convert(src, dst)
+            self.assertEqual(out, dst)
+            self.assertTrue(dst.exists())
 
 if __name__ == "__main__":
     unittest.main()

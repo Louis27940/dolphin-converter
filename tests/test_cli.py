@@ -160,5 +160,57 @@ class TestCliAndDispatcher(unittest.TestCase):
                 self.assertTrue(mock_success.called)
                 mock_conv.assert_called_once_with(f1.resolve(), out_dir.resolve() / "f1.webp", quality="75")
 
+    def test_dispatcher_same_format_in_place_error(self):
+        dispatcher = self.mod.ConversionDispatcher()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / "image.png"
+            src.touch()
+
+            # output_dir is None
+            with self.assertRaises(self.mod.ConversionError) as ctx:
+                dispatcher.convert_single(src, "png")
+            self.assertIn("Le fichier source 'image.png' est deja au format PNG.", str(ctx.exception))
+
+            # output_dir is src.parent
+            with self.assertRaises(self.mod.ConversionError) as ctx:
+                dispatcher.convert_single(src, "PNG", output_dir=src.parent)
+            self.assertIn("Le fichier source 'image.png' est deja au format PNG.", str(ctx.exception))
+
+            # Different output_dir does NOT raise
+            out_dir = Path(tmpdir) / "other"
+            out_dir.mkdir()
+            with patch.object(self.mod.ImageAdapter, "convert", return_value=out_dir / "image.png"):
+                res = dispatcher.convert_single(src, "png", output_dir=out_dir)
+                self.assertEqual(res, out_dir / "image.png")
+
+    def test_dispatcher_batch_concurrent_reservation(self):
+        dispatcher = self.mod.ConversionDispatcher()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dir1 = Path(tmpdir) / "dir1"
+            dir2 = Path(tmpdir) / "dir2"
+            dir1.mkdir()
+            dir2.mkdir()
+            f1 = dir1 / "photo.jpg"
+            f2 = dir2 / "photo.jpg"
+            f1.touch()
+            f2.touch()
+            out_dir = Path(tmpdir) / "out"
+            out_dir.mkdir()
+
+            allocated_targets = []
+            def fake_convert(src, dst, quality=None):
+                import time
+                time.sleep(0.02)
+                dst.touch()
+                allocated_targets.append(dst)
+                return dst
+
+            with patch.object(self.mod.ImageAdapter, "convert", side_effect=fake_convert):
+                ret = dispatcher.run_batch([f1, f2], "png", output_dir=out_dir, silent=True)
+                self.assertEqual(ret, 0)
+                self.assertEqual(len(allocated_targets), 2)
+                target_names = {t.name for t in allocated_targets}
+                self.assertEqual(target_names, {"photo.png", "photo_1.png"})
+
 if __name__ == "__main__":
     unittest.main()

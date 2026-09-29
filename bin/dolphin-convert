@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -22,8 +23,9 @@ class NamingResolver:
         return directory / new_name
 
     @staticmethod
-    def get_unique_path(target_path: Path) -> Path:
-        if not target_path.exists():
+    def get_unique_path(target_path: Path, reserved_paths: Optional[set[Path]] = None) -> Path:
+        is_taken = lambda p: p.exists() or (reserved_paths is not None and p in reserved_paths)
+        if not is_taken(target_path):
             return target_path
 
         parent = target_path.parent
@@ -33,7 +35,7 @@ class NamingResolver:
         counter = 1
         while True:
             candidate = parent / f"{stem}_{counter}{suffix}"
-            if not candidate.exists():
+            if not is_taken(candidate):
                 return candidate
             counter += 1
 
@@ -129,6 +131,7 @@ class ImageAdapter(BaseAdapter):
 
     SUPPORTED_INPUTS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".tif", ".svg", ".gif", ".heic"}
     SUPPORTED_TARGETS = {"webp", "png", "jpg", "jpeg", "avif", "bmp", "tiff"}
+    QUALITY_MAP = {"high": "95", "medium": "80", "low": "60"}
 
     def can_handle(self, source_path: Path, target_format: str) -> bool:
         fmt = target_format.lower().lstrip(".")
@@ -143,7 +146,9 @@ class ImageAdapter(BaseAdapter):
         cmd = [tool, str(source_path), "-auto-orient"]
 
         if quality:
-            cmd.extend(["-quality", str(quality)])
+            q_str = str(quality).strip()
+            resolved_quality = self.QUALITY_MAP.get(q_str.lower(), q_str)
+            cmd.extend(["-quality", resolved_quality])
         elif target_fmt in ("jpg", "jpeg"):
             cmd.extend(["-quality", "90"])
         elif target_fmt == "webp":
@@ -189,7 +194,7 @@ class MediaAdapter(BaseAdapter):
         elif target_fmt == "webm":
             cmd.extend(["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-c:a", "libopus", "-b:a", "128k"])
         elif target_fmt == "mp3":
-            cmd.extend(["-vn", "-c:a", "libmp3lame", "-q:a", "2"])
+            cmd.extend(["-vn", "-c:a", "libmp3lame", "-b:a", "320k"])
         elif target_fmt == "aac":
             cmd.extend(["-vn", "-c:a", "aac", "-b:a", "256k"])
         elif target_fmt == "flac":
@@ -268,9 +273,10 @@ class DocumentAdapter(BaseAdapter):
                 if res.returncode != 0:
                     raise ConversionError(f"Erreur LibreOffice : {res.stderr.strip() or res.stdout.strip()}")
 
-                default_output = Path(tmpdir) / f"{source_path.stem}.pdf"
-                if default_output.exists():
-                    shutil.move(str(default_output), str(target_path))
+                pdfs = list(Path(tmpdir).glob("*.pdf"))
+                if not pdfs:
+                    raise ConversionError(f"LibreOffice n'a produit aucun fichier PDF pour {source_path.name}")
+                shutil.move(str(pdfs[0]), str(target_path))
             return target_path
 
         if ext == ".md":
@@ -295,6 +301,8 @@ class ConversionDispatcher:
             MediaAdapter(),
             DocumentAdapter(),
         ]
+        self._lock = threading.Lock()
+        self.reserved_paths: set[Path] = set()
 
     def get_adapter(self, source_path: Path, target_format: str) -> BaseAdapter:
         for adapter in self.adapters:
@@ -302,19 +310,34 @@ class ConversionDispatcher:
                 return adapter
         raise ConversionError(f"Aucune regle de conversion disponible pour '{source_path.suffix}' vers '{target_format}'.")
 
-    def convert_single(self, source_path: Path, target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None) -> Path:
+    def convert_single(self, source_path: Path, target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None, reserved_paths: Optional[set[Path]] = None) -> Path:
         if not source_path.exists():
             raise ConversionError(f"Le fichier source n'existe pas : {source_path}")
+
+        fmt_ext = f".{target_format.lower().lstrip('.')}"
+        is_same_dir = (
+            output_dir is None
+            or output_dir == source_path.parent
+            or (output_dir is not None and output_dir.resolve() == source_path.resolve().parent)
+        )
+        if source_path.suffix.lower() == fmt_ext and is_same_dir:
+            raise ConversionError(f"Le fichier source '{source_path.name}' est deja au format {target_format.upper().lstrip('.')}.")
 
         adapter = self.get_adapter(source_path, target_format)
         target_path = NamingResolver.resolve_target_path(source_path, target_format, output_dir=output_dir)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        unique_target = NamingResolver.get_unique_path(target_path)
+        with self._lock:
+            pool = self.reserved_paths if reserved_paths is None else reserved_paths
+            unique_target = NamingResolver.get_unique_path(target_path, reserved_paths=pool)
+            pool.add(unique_target)
         return adapter.convert(source_path, unique_target, quality=quality)
 
     def run_batch(self, sources: list[Path], target_format: str, output_dir: Optional[Path] = None, quality: Optional[str] = None, silent: bool = False) -> int:
         if not sources:
             return 0
+
+        with self._lock:
+            self.reserved_paths.clear()
 
         Notifier.send_start(count=len(sources), target_format=target_format, silent=silent)
 
