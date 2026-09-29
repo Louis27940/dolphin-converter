@@ -23,6 +23,7 @@ user-install:
 	cp bin/dolphin-convert $(USER_BIN)/dolphin-convert
 	chmod +x $(USER_BIN)/dolphin-convert
 	cp servicemenus/*.desktop $(USER_MENUS)/
+	chmod +x $(USER_MENUS)/*.desktop
 	@echo "Installation utilisateur terminee."
 
 user-uninstall:
