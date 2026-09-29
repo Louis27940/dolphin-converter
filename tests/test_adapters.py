@@ -251,5 +251,89 @@ class TestAdapters(unittest.TestCase):
             adapter.convert(Path("/tmp/test.docx"), Path("/tmp/test.pdf"))
         self.assertIn("LibreOffice crash", str(ctx.exception))
 
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/pdftoppm")
+    def test_document_convert_pdf_to_jpeg_extension_normalization(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        adapter = self.mod.DocumentAdapter()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            src = tmp_path / "document.pdf"
+            src.touch()
+            dst = tmp_path / "document.jpeg"
+
+            # Simulate pdftoppm generating -1.jpg
+            single_page = tmp_path / "document-1.jpg"
+            single_page.touch()
+
+            out = adapter.convert(src, dst)
+            self.assertEqual(out, dst)
+            self.assertTrue(dst.exists())
+            self.assertFalse(single_page.exists())
+            args = mock_run.call_args[0][0]
+            self.assertIn("-jpeg", args)
+
+    @patch("subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/libreoffice")
+    def test_document_convert_doc_to_pdf_collision_rename(self, mock_which, mock_run):
+        adapter = self.mod.DocumentAdapter()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            src = tmp_path / "document.docx"
+            src.touch()
+            dst = tmp_path / "document_1.pdf"
+
+            def fake_run(cmd, **kwargs):
+                (tmp_path / "document.pdf").touch()
+                return MagicMock(returncode=0)
+
+            mock_run.side_effect = fake_run
+
+            out = adapter.convert(src, dst)
+            self.assertEqual(out, dst)
+            self.assertTrue(dst.exists())
+            self.assertFalse((tmp_path / "document.pdf").exists())
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_document_convert_md_to_pdf_prioritizes_pandoc(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_which.side_effect = lambda tool: f"/usr/bin/{tool}"
+        adapter = self.mod.DocumentAdapter()
+        src = Path("/tmp/test.md")
+        dst = Path("/tmp/test.pdf")
+
+        out = adapter.convert(src, dst)
+        self.assertEqual(out, dst)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "/usr/bin/pandoc")
+        self.assertIn("-o", args)
+
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_document_convert_md_to_pdf_fallback_libreoffice(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_which.side_effect = lambda tool: "/usr/bin/libreoffice" if tool == "libreoffice" else None
+        adapter = self.mod.DocumentAdapter()
+        src = Path("/tmp/test.md")
+        dst = Path("/tmp/test.pdf")
+
+        out = adapter.convert(src, dst)
+        self.assertEqual(out, dst)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "/usr/bin/libreoffice")
+        self.assertIn("--headless", args)
+        self.assertIn("--convert-to", args)
+        self.assertIn("pdf", args)
+
+    @patch("shutil.which", return_value=None)
+    def test_document_convert_md_to_pdf_missing_all_tools(self, mock_which):
+        adapter = self.mod.DocumentAdapter()
+        with self.assertRaises(self.mod.MissingToolError) as ctx:
+            adapter.convert(Path("/tmp/test.md"), Path("/tmp/test.pdf"))
+        self.assertEqual(ctx.exception.tool_name, "libreoffice")
+
 if __name__ == "__main__":
     unittest.main()
