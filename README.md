@@ -45,3 +45,16 @@ dolphin-convert --format png document.pdf
 ```bash
 make test
 ```
+
+## Workflow de Contribution
+
+Le projet suit un flux Git structure :
+
+1. Creer une branche de fonctionnalite (`feat/...`) ou de correction (`fix/...`) depuis `develop`.
+2. Ouvrir une Pull Request vers la branche `develop`.
+3. Apres revue, tests et validation sur `develop`, ouvrir une Pull Request de `develop` vers `main`.
+4. La branche `main` est protegee : tout changement passe obligatoirement par une PR validee.
+
+## Licence
+
+Ce projet est distribue sous licence MIT. Consultez le fichier [LICENSE](LICENSE) pour plus de details.
